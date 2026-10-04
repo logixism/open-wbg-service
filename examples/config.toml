@@ -1,0 +1,59 @@
+# Copy to ~/.config/open-wbg-service/config.toml only if defaults need changing.
+# Existing Wootility app links are read directly from the keyboard automatically.
+# Stop the proprietary service before starting this replacement.
+
+# Native IPC: auto selects NIRI_SOCKET, SWAYSOCK, then HYPRLAND_INSTANCE_SIGNATURE.
+# No X11 fallback: XWayland games are identified by the compositor's app_id/WM_CLASS.
+backend = "auto"
+api = true
+api_port = 50052
+
+# Linux provider sampling / current profile checks; focus events switch immediately.
+interval_ms = 1000
+# Detect profile/app-link edits made in Wootility without restarting the daemon.
+catalog_refresh_secs = 10
+restore_on_exit = true
+# Used only when starting with a linked profile and no known previous onboard one.
+fallback_profile = 0
+notify = false
+# Empty selects all connected modern Wooting keyboards. Exact USB serials otherwise.
+serials = []
+enabled_sources = ["system_info_source", "system_volume", "system_battery_source"]
+
+# Optional overrides: first matching rule wins before keyboard-resident app links.
+# All selectors in one rule must match. Regex selectors are case-sensitive unless
+# prefixed (?i). Use `open-wbg-service watch` to inspect the exact focused identity.
+# Indices are zero-based: onboard:0=P1; linked:0=first Linked Profiles slot.
+# Rules must reference profiles actually stored on that keyboard; no profile is flashed.
+#
+# [[rules]]
+# profile = "linked:0"
+# app_id = "^steam_app_730$"
+#
+# [[rules]]
+# profile = "onboard:1"
+# app_id = "(?i)^my-game$"
+# title = "Game"
+# serial = "your-keyboard-serial"
+#
+# [[rules]]
+# profile = "linked:1"
+# steam_id = 570
+
+[discord]
+# Optional. Discord RPC requires an approved app or your account on its tester list.
+# Run `open-wbg-service discord-login --help` for the consent/token workflow.
+# Never put a Discord session token or client secret here.
+client_id = ""
+# token_file = "/absolute/path/to/private/oauth-token.json"
+
+# SIGHUP reloads rules/providers; restart after changing backend or API settings.
+# Supported host effects: CPU/RAM/swap/disk/network/temperature, speaker level/mute,
+# battery level/charging, authenticated Discord mute/notification events.
+# Configure Light Indicator effects in Wootility. Firmware supplies source slots;
+# this service never assumes "slot 0 = volume". Lightbar hardware is not on 60HE v2.
+# Temperature and battery keys are native Linux keys; reselect them in Wootility
+# if migrating effects that referenced proprietary platform-specific sensor names.
+# The proprietary os/kind enum is omitted until its Linux wire value is verified.
+# Service updates use your package manager or `cargo install --path . --locked`.
+# Wootility's proprietary self-update RPCs report that restriction, not fake success.

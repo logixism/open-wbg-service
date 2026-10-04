@@ -1,0 +1,6 @@
+# OMS native Beads database
+/oms-beads.sqlite
+/oms-beads.sqlite-shm
+/oms-beads.sqlite-wal
+/oms-interchange-journal.json
+/.oms-interchange-*

@@ -1,0 +1,5 @@
+# Allow the active local seat user to access Wooting HID configuration interfaces.
+# Install: sudo install -m 644 packaging/70-open-wbg-service.rules /etc/udev/rules.d/
+# Then: sudo udevadm control --reload-rules ; reconnect the keyboard.
+# No world-writable permissions, no daemon running as root.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="31e3", MODE="0660", TAG+="uaccess"
