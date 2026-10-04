@@ -174,8 +174,17 @@ async fn dispatch(State(server): State<Arc<Server>>, req: Request) -> Response {
     }
     let mut content_types = req.headers().get_all(header::CONTENT_TYPE).iter();
     let text = match content_types.next().and_then(|v| v.to_str().ok()) {
-        Some("application/grpc-web+proto") if content_types.next().is_none() => false,
-        Some("application/grpc-web-text+proto") if content_types.next().is_none() => true,
+        // Protobuf is the default codec when the optional +proto suffix is absent.
+        Some("application/grpc-web" | "application/grpc-web+proto")
+            if content_types.next().is_none() =>
+        {
+            false
+        }
+        Some("application/grpc-web-text" | "application/grpc-web-text+proto")
+            if content_types.next().is_none() =>
+        {
+            true
+        }
         _ => {
             return reply(
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -691,6 +700,63 @@ async fn open_log_dir(path: &PathBuf) -> std::result::Result<(), (u32, String)> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stock_wootility_text_media_type_is_accepted() {
+        let (settings, _) = watch::channel(Arc::new(config::Config {
+            notify: true,
+            ..config::Config::default()
+        }));
+        let server = Arc::new(Server {
+            state: ApiState {
+                settings: Arc::new(Mutex::new(config::Store {
+                    path: PathBuf::new(),
+                    tx: settings,
+                })),
+                backend: compositor::Backend::Niri,
+                points: watch::channel(Vec::new()).1,
+                status: watch::channel(serde_json::Value::Null).1,
+                inventory_changed: watch::channel(0).1,
+                log_dir: PathBuf::new(),
+            },
+            shutdown: watch::channel(false).1,
+            apps: Mutex::new(None),
+        });
+        // Wootility 5.4.2's default protobuf-ts transport omits the optional
+        // +proto suffix and sends this base64-encoded empty request.
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/wooting_service.WootilityService/GetAppSwitchNotificationEnabled")
+            .header(header::HOST, "localhost:50052")
+            .header(header::ORIGIN, "https://wootility.io")
+            .header(header::ACCEPT, "application/grpc-web-text")
+            .header(header::CONTENT_TYPE, "application/grpc-web-text")
+            .header("x-grpc-web", "1")
+            .body(Body::from("AAAAAAA="))
+            .unwrap();
+        let response = dispatch(State(server), request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+            "https://wootility.io"
+        );
+        let body = to_bytes(response.into_body(), MAX_BODY).await.unwrap();
+        let wire = STANDARD.decode(body).unwrap();
+        assert_eq!(wire[0], 0);
+        let length = u32::from_be_bytes(wire[1..5].try_into().unwrap()) as usize;
+        let enabled = proto::Enabled::decode(&wire[5..5 + length]).unwrap();
+        assert!(enabled.enabled);
+        let trailers = &wire[5 + length..];
+        assert_eq!(trailers[0], 0x80);
+        let length = u32::from_be_bytes(trailers[1..5].try_into().unwrap()) as usize;
+        assert_eq!(trailers.len(), 5 + length);
+        assert!(
+            std::str::from_utf8(&trailers[5..])
+                .unwrap()
+                .contains("grpc-status: 0\r\n")
+        );
+    }
+
     #[test]
     fn unary_frame_is_exact_and_uncompressed() {
         let mut wire = frame(0, &[8, 1]);
