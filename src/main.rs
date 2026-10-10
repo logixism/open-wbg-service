@@ -85,7 +85,7 @@ enum Command {
     },
     /// List supported control interfaces without changing keyboard state
     Devices,
-    /// Read onboard/linked profile names and app links directly from keyboards
+    /// Read stored profiles and app links; safe while the daemon is running
     Profiles {
         #[arg(long)]
         serial: Option<String>,
@@ -182,19 +182,23 @@ async fn execute(cli: Cli, log_dir: PathBuf) -> Result<()> {
         }
         Command::Devices => println!("{}", serde_json::to_string_pretty(&hid::enumerate()?)?),
         Command::Profiles { serial } => {
-            let _lock = runtime::device_lock()?;
             let config = config::Config::load(&path)?;
+            let mut access = runtime::HardwareLock::open()?;
+            let io_guard = access.lock()?;
             let mut catalogs = Vec::new();
             for info in selected_devices(serial.as_deref(), &config)? {
                 let device = hid::Device::open(&info)?;
                 catalogs.push(json!({"device":info,"current":device.current_profile()?,"linked":device.linked_profile()?,"profiles":device.profiles()?}));
             }
+            drop(io_guard);
             println!("{}", serde_json::to_string_pretty(&catalogs)?);
         }
         Command::Switch { profile, serial } => {
             let id = config::parse_profile(&profile)?;
             let config = config::Config::load(&path)?;
             let _lock = runtime::device_lock()?;
+            let mut access = runtime::HardwareLock::open()?;
+            let _io = access.lock()?;
             for info in selected_devices(serial.as_deref(), &config)? {
                 let device = hid::Device::open(&info)?;
                 let catalog = device.profiles()?;

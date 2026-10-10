@@ -34,22 +34,50 @@ pub struct Options {
     pub log_dir: PathBuf,
 }
 
-/// Shared by run/profiles/switch: two copies of this implementation must never
-/// interleave command/reply transactions. Wootility remains a separate HID client.
+/// Lifetime ownership for the daemon and manual profile switches.
 pub fn device_lock() -> Result<File> {
+    let file = lock_file("open-wbg-service.lock")?;
+    fs2::FileExt::try_lock_exclusive(&file).context("another open-wbg-service instance owns the keyboard; stop it before switching profiles or starting a second daemon")?;
+    Ok(file)
+}
+
+fn lock_file(name: &str) -> Result<File> {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR")
         .context("XDG_RUNTIME_DIR is not set; run in your desktop user session")?;
-    let path = Path::new(&runtime).join("open-wbg-service.lock");
-    let file = OpenOptions::new()
+    let path = Path::new(&runtime).join(name);
+    Ok(OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(&path)?;
-    fs2::FileExt::try_lock_exclusive(&file).context("another open-wbg-service instance owns the keyboard; stop it before using a direct hardware command")?;
-    Ok(file)
+        .open(&path)?)
+}
+
+/// Serialize complete HID read/write batches, not the daemon's idle time.
+/// Keep the descriptor open between batches; Wootility is a separate HID client.
+pub struct HardwareLock(File);
+
+impl HardwareLock {
+    pub fn open() -> Result<Self> {
+        Ok(Self(lock_file("open-wbg-service-hid.lock")?))
+    }
+
+    pub fn lock(&mut self) -> Result<HardwareGuard<'_>> {
+        fs2::FileExt::lock_exclusive(&self.0).context("waiting for keyboard HID access")?;
+        Ok(HardwareGuard(&self.0))
+    }
+}
+
+pub struct HardwareGuard<'a>(&'a File);
+
+impl Drop for HardwareGuard<'_> {
+    fn drop(&mut self) {
+        if let Err(error) = fs2::FileExt::unlock(self.0) {
+            tracing::error!(%error, "could not release keyboard HID access");
+        }
+    }
 }
 
 struct Tracked {
@@ -233,7 +261,8 @@ fn hardware(
     wake: mpsc::Receiver<()>,
     backend: Backend,
     dry_run: bool,
-) {
+) -> Result<()> {
+    let mut access = HardwareLock::open()?;
     let mut devices: HashMap<String, Tracked> = HashMap::new();
     let mut failures: HashMap<String, String> = HashMap::new();
     let mut next_scan = Instant::now();
@@ -259,6 +288,8 @@ fn hardware(
             next_tick = now + Duration::from_millis(config.interval_ms);
         }
         let scan = now >= next_scan || config_changed;
+        let update = tick || focus_changed || config_changed || scan;
+        let io_guard = if update { Some(access.lock()?) } else { None };
         if scan {
             next_scan = now + Duration::from_secs(3);
             match hid::enumerate() {
@@ -306,7 +337,7 @@ fn hardware(
                 }
             }
         }
-        if tick || focus_changed || config_changed || scan {
+        if update {
             let points = channels.points.borrow();
             for device in devices.values_mut() {
                 if *channels.shutdown.borrow() {
@@ -343,6 +374,7 @@ fn hardware(
                 "unavailable_devices":failures,"enumeration_error":enumeration_error}),
             );
         }
+        drop(io_guard);
         let wait = next_tick
             .min(next_scan)
             .saturating_duration_since(Instant::now())
@@ -354,10 +386,14 @@ fn hardware(
             break;
         }
     }
-    let config = channels.config.borrow().clone();
-    for device in devices.values_mut() {
-        device.restore(&config, dry_run);
+    if !devices.is_empty() {
+        let _io = access.lock()?;
+        let config = channels.config.borrow().clone();
+        for device in devices.values_mut() {
+            device.restore(&config, dry_run);
+        }
     }
+    Ok(())
 }
 
 fn same_inventory(a: &[DataPoint], b: &[DataPoint]) -> bool {
@@ -522,8 +558,10 @@ pub async fn run(options: Options) -> Result<()> {
     compositor.abort();
     // HID ownership and restoration finish before releasing the process lock.
     let joined = tokio::task::spawn_blocking(move || hardware.join()).await?;
-    if joined.is_err() {
-        result = Err(anyhow::anyhow!("HID worker panicked"));
+    match joined {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => result = Err(error.context("HID worker failed")),
+        Err(_) => result = Err(anyhow::anyhow!("HID worker panicked")),
     }
     notify.abort();
     if tokio::time::timeout(Duration::from_secs(3), &mut discord)
@@ -551,4 +589,51 @@ pub async fn run(options: Options) -> Result<()> {
     }
     tracing::info!("open-wbg-service stopped");
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn hid_batches_are_exclusive_and_release_after_errors() {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "open-wbg-hid-lock-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        let probe = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        // Both descriptors retain the inode; no test artifact survives a panic.
+        std::fs::remove_file(path).unwrap();
+        let mut access = HardwareLock(file);
+
+        for fail in [false, true] {
+            let result: Result<()> = (|| {
+                let _guard = access.lock()?;
+                assert_eq!(
+                    fs2::FileExt::try_lock_exclusive(&probe).unwrap_err().kind(),
+                    std::io::ErrorKind::WouldBlock
+                );
+                if fail {
+                    bail!("interrupted HID batch");
+                }
+                Ok(())
+            })();
+            assert_eq!(result.is_err(), fail);
+            fs2::FileExt::try_lock_exclusive(&probe).unwrap();
+            fs2::FileExt::unlock(&probe).unwrap();
+        }
+    }
 }

@@ -100,6 +100,12 @@ By default, the service restores the previous onboard profile on graceful
 SIGINT/SIGTERM shutdown, including Ctrl+C. Configuration is optional: existing
 keyboard app links work with the defaults.
 
+`profiles` also works while the service is running, including with `--no-api`.
+It reads live keyboard state under an exclusive cross-process HID lock, waiting
+for any in-flight hardware batch instead of competing for its replies. Profile
+reads do not change keyboard state. Manual `switch` commands still require stopping
+the daemon.
+
 ### Start automatically
 
 Stop the foreground instance before installing autostart. Run the installer from
@@ -249,7 +255,7 @@ update this service through your package manager or a new source build instead.
 | Command | Purpose |
 | --- | --- |
 | `devices` | List supported HID control interfaces without changing keyboard state. |
-| `profiles [--serial SERIAL]` | Read stored profiles and app links; stop the daemon first. |
+| `profiles [--serial SERIAL]` | Read live stored profiles and app links without stopping the daemon. |
 | `switch onboard:0 [--serial SERIAL]` | Manually activate an existing profile; stop the daemon first. Also accepts `linked:INDEX`. |
 | `watch [--backend BACKEND]` | Print focus events and resolved application identities as JSON. |
 | `apps` | List installed XDG desktop and native/Flatpak Steam applications. |
@@ -264,8 +270,9 @@ Run `open-wbg-service COMMAND --help` for command-specific options.
 - **No supported compositor socket:** run inside Niri/Sway/Hyprland. For autostart,
   import the live session environment into `systemd --user`; `install-user` does
   this for the session in which it runs.
-- **Device lock held:** stop the running service before using `profiles`, `switch`,
-  or another `run` instance. Do not remove an active process's lock file.
+- **Device lock held:** stop the running service before using `switch` or another
+  `run` instance. `profiles` only waits for in-flight HID access and can run alongside
+  the daemon. Do not remove an active process's lock files.
 - **Port 50052 already in use:** stop the competing background service. A custom
   `api_port` changes the listener, but Wootility expects the default port.
 - **Wootility cannot connect:** check `status`, ensure the API is enabled, and allow
@@ -295,8 +302,9 @@ cargo install --path . --locked --force
 systemctl --user restart open-wbg-service.service
 ```
 
-Restart only if you use the user service. Do not use Wootility's proprietary
-updater to update this executable.
+If you use a daemon, restart it before using the updated CLI so both processes use
+the same HID locking protocol. Do not use Wootility's proprietary updater to update
+this executable.
 
 ## License
 
